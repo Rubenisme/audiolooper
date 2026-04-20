@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 import librosa
 import soundfile as sf
-from scipy.signal import find_peaks
+from scipy.signal import correlate, find_peaks
 
 sys.path.insert(0, str(Path(__file__).parent))
 from loop import load_audio, render_loop
@@ -210,6 +210,64 @@ def find_loop_in_body(
     return all_scored, bpm, cand_frames, beat_frames
 
 
+def align_loop_endpoints(
+    audio_mono: np.ndarray,
+    sr: int,
+    start_s: float,
+    end_s: float,
+    search_ms: float = 50.0,
+) -> tuple[float, float]:
+    """Shift end_s by up to ±search_ms to minimise waveform discontinuity at the loop boundary.
+
+    Cross-correlates a window centred on loop_start with a search region around loop_end.
+    The lag that maximises correlation is where the waveform phase at loop_end best matches
+    the phase at loop_start, reducing the audible discontinuity inside the crossfade.
+    """
+    search_n = int(search_ms / 1000.0 * sr)
+    win_n = search_n * 2
+
+    s = int(round(start_s * sr))
+    e = int(round(end_s * sr))
+
+    if s < win_n or e - search_n - win_n < 0 or e + search_n + win_n > len(audio_mono):
+        return start_s, end_s
+
+    ref = audio_mono[s - win_n : s + win_n].astype(np.float64)
+    region = audio_mono[e - search_n - win_n : e + search_n + win_n].astype(np.float64)
+
+    xcorr = correlate(region, ref, mode="valid")
+    best_lag = int(np.argmax(xcorr)) - search_n
+
+    return start_s, end_s + best_lag / sr
+
+
+def compute_adaptive_gain_db(
+    audio_mono: np.ndarray,
+    sr: int,
+    loop_start_s: float,
+    loop_end_s: float,
+    fade_out_s: float,
+    fade_in_s: float,
+) -> float:
+    """Return gain_db that makes the incoming pre-head RMS match the outgoing tail RMS."""
+    loop_start = int(round(loop_start_s * sr))
+    loop_end = int(round(loop_end_s * sr))
+    fade_out_n = int(round(fade_out_s * sr))
+    fade_in_n = int(round(fade_in_s * sr))
+
+    outgoing = audio_mono[loop_end - fade_out_n : loop_end]
+    incoming = audio_mono[loop_start - fade_in_n : loop_start]
+
+    rms_out = float(np.sqrt(np.mean(outgoing ** 2)))
+    rms_in = float(np.sqrt(np.mean(incoming ** 2)))
+
+    if rms_in < 1e-10:
+        return 0.0
+
+    gain_db = 20.0 * float(np.log10(rms_out / rms_in))
+    return float(np.clip(gain_db, -12.0, 12.0))
+
+
 def snap_to_bars(target_s: float, bar_s: float, choices: list[int]) -> tuple[int, float]:
     cands = [(n, n * bar_s) for n in choices]
     return min(cands, key=lambda c: abs(c[1] - target_s))
@@ -284,21 +342,31 @@ def main():
     print(f"  fade_out: {fade_out_s:.2f}s  (target was {target_out_s:.2f}s, start snapped to downbeat)")
     print(f"  fade_in:  {fade_in_s:.2f}s  (target was {target_in_s:.2f}s, start snapped to downbeat)\n")
 
+    print("[5] phase alignment")
+    original_end_s = best["end_s"]
+    best["start_s"], best["end_s"] = align_loop_endpoints(mono, args.sr, best["start_s"], best["end_s"])
+    shift_ms = (best["end_s"] - original_end_s) * 1000
+    print(f"  end shifted by {shift_ms:+.1f}ms  ({original_end_s:.3f}s -> {best['end_s']:.3f}s)\n")
+
+    print("[6] adaptive loudness")
+    gain_db = compute_adaptive_gain_db(mono, args.sr, best["start_s"], best["end_s"], fade_out_s, fade_in_s)
+    print(f"  incoming pre-head will be {gain_db:+.2f}dB relative to outgoing tail\n")
+
     print("suggested loop.py command:")
     print(
         f'  uv run loop.py "{args.input.name}" \\\n'
         f'    --start {best["start_s"]:.2f} --end {best["end_s"]:.2f} \\\n'
         f'    --fade-out-ms {fade_out_s*1000:.0f} --fade-in-ms {fade_in_s*1000:.0f} \\\n'
-        f'    --gain-db {args.gain_db} --repeats {args.repeats}'
+        f'    --gain-db {gain_db:.2f} --repeats {args.repeats}'
     )
 
     if args.render:
-        print("\n[4] rendering...")
+        print("\nrendering...")
         out = render_loop(
             audio, args.sr,
             best["start_s"], best["end_s"],
             fade_out_s * 1000, fade_in_s * 1000,
-            args.gain_db, args.repeats,
+            gain_db, args.repeats,
             include_intro=True,
         )
         out_path = args.input.parent / "Loops" / f"{args.input.stem}_auto.wav"
