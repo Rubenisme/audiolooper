@@ -5,3 +5,5 @@
 *.flac
 *.ogg
 Loops/
+__pycache__/
+.claude/
