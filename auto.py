@@ -100,6 +100,34 @@ def detect_body(
     return first * HOP / sr, last * HOP / sr
 
 
+def detect_downbeats(beat_frames: np.ndarray, peak_frames: np.ndarray, meter: int = 4) -> np.ndarray:
+    """Group beats into bars and pick the phase whose downbeats align closest to structural peaks."""
+    if len(beat_frames) < meter:
+        return beat_frames
+    best_phase, best_score = 0, float("inf")
+    for phase in range(meter):
+        candidates = beat_frames[phase::meter]
+        score = float(sum(int(np.min(np.abs(candidates - p))) for p in peak_frames)) if len(peak_frames) > 0 else 0.0
+        if score < best_score:
+            best_score, best_phase = score, phase
+    return beat_frames[best_phase::meter]
+
+
+def snap_fade_to_downbeat(
+    anchor_s: float,
+    target_s: float,
+    downbeat_times: np.ndarray,
+    min_s: float,
+    max_s: float,
+) -> float:
+    """Return fade duration so that anchor_s - duration lands on the nearest downbeat."""
+    start_target = anchor_s - target_s
+    valid = downbeat_times[(downbeat_times >= anchor_s - max_s) & (downbeat_times <= anchor_s - min_s)]
+    if len(valid) == 0:
+        return target_s
+    return anchor_s - float(valid[np.argmin(np.abs(valid - start_target))])
+
+
 def find_loop_in_body(
     audio_mono: np.ndarray,
     sr: int,
@@ -110,11 +138,12 @@ def find_loop_in_body(
     context_frames: int = 40,
     peak_tolerance_s: float = 1.0,
     peak_bonus: float = 0.15,
-) -> tuple[dict | None, float, np.ndarray]:
+) -> tuple[dict | None, float, np.ndarray, np.ndarray]:
     tempo, beat_frames = librosa.beat.beat_track(y=audio_mono, sr=sr, hop_length=HOP)
     bpm = float(tempo if np.isscalar(tempo) else tempo[0])
 
-    chroma = librosa.feature.chroma_stft(y=audio_mono, sr=sr, hop_length=HOP)
+    harmonic, _ = librosa.effects.hpss(audio_mono)
+    chroma = librosa.feature.chroma_stft(y=harmonic, sr=sr, hop_length=HOP)
     chroma_max = chroma.shape[1]
 
     # candidate positions: union of beats and novelty peaks
@@ -178,7 +207,7 @@ def find_loop_in_body(
             })
 
     all_scored.sort(key=lambda x: x["score"], reverse=True)
-    return all_scored, bpm, cand_frames
+    return all_scored, bpm, cand_frames, beat_frames
 
 
 def snap_to_bars(target_s: float, bar_s: float, choices: list[int]) -> tuple[int, float]:
@@ -219,8 +248,8 @@ def main():
         print(f"  body (RMS fallback): {body_start:.2f}s -> {body_end:.2f}s")
     print()
 
-    print("[3] BPM + loop search (beats + novelty peaks as candidates)")
-    all_pairs, bpm, cand_frames = find_loop_in_body(
+    print("[3] BPM + loop search (beats + novelty peaks as candidates, HPSS chroma)")
+    all_pairs, bpm, cand_frames, beat_frames = find_loop_in_body(
         mono, args.sr, body_start, body_end, peaks, min_loop_s=args.min_loop_s,
     )
     print(f"  bpm: {bpm:.1f}  ({len(cand_frames)} candidate positions in body)")
@@ -238,16 +267,22 @@ def main():
     best = all_pairs[0]
     print()
 
-    print("[4] bar-snapped fade durations")
+    print("[4] downbeat-snapped fade durations")
     bar_s = 4 * 60 / bpm
     body_dur = best["end_s"] - best["start_s"]
     target_out_s = min(body_dur * 0.20, 16.0)
     target_in_s = min(body_dur * 0.10, 8.0)
-    out_bars, fade_out_s = snap_to_bars(target_out_s, bar_s, [4, 6, 8, 12, 16])
-    in_bars, fade_in_s = snap_to_bars(target_in_s, bar_s, [2, 4, 6, 8])
-    print(f"  bar length: {bar_s:.3f}s (at {bpm:.1f} bpm, 4/4)")
-    print(f"  fade_out: {out_bars} bars = {fade_out_s:.2f}s  (target was {target_out_s:.2f}s)")
-    print(f"  fade_in:  {in_bars} bars = {fade_in_s:.2f}s  (target was {target_in_s:.2f}s)\n")
+
+    downbeat_frames = detect_downbeats(beat_frames, peaks)
+    downbeat_times = downbeat_frames * HOP / args.sr
+    phase_offset_s = float(downbeat_times[0]) if len(downbeat_times) > 0 else 0.0
+    print(f"  bar length: {bar_s:.3f}s (at {bpm:.1f} bpm, 4/4)  downbeat phase: {phase_offset_s:.2f}s")
+
+    fade_out_s = snap_fade_to_downbeat(best["end_s"], target_out_s, downbeat_times, bar_s * 3, bar_s * 18)
+    fade_in_s = snap_fade_to_downbeat(best["start_s"], target_in_s, downbeat_times, bar_s * 1, bar_s * 10)
+    fade_in_s = min(fade_in_s, fade_out_s)
+    print(f"  fade_out: {fade_out_s:.2f}s  (target was {target_out_s:.2f}s, start snapped to downbeat)")
+    print(f"  fade_in:  {fade_in_s:.2f}s  (target was {target_in_s:.2f}s, start snapped to downbeat)\n")
 
     print("suggested loop.py command:")
     print(
