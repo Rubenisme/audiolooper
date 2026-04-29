@@ -2,7 +2,7 @@
 
 Two small Python scripts that turn a song into a smooth long-form loop:
 
-- **`loop.py`** — deterministic renderer. You give it loop points and fade parameters; it writes a WAV with `intro + body + (crossfade + body) × (repeats−1) + fade-out tail`.
+- **`loop.py`** — deterministic renderer. You give it loop points and fade parameters; it writes a WAV with `intro + body + (crossfade + body) × (repeats−1) + outro`.
 - **`auto.py`** — analysis front-end. Detects where the body starts/ends, finds candidate loop points, and picks fade lengths that fall on musical bar boundaries. Prints a ready-to-run `loop.py` command.
 
 Both scripts are standalone and designed to work together.
@@ -33,7 +33,7 @@ intro  |  body  | crossfade | body | crossfade | body | … | final_tail
 - `intro` = `audio[0 : loop_start]` — plays once, untouched.
 - `body` = `audio[loop_start : loop_end − fade_out_n]` — the loop content minus the tail region.
 - `crossfade` = outgoing tail faded out + incoming pre-head faded in.
-- `final_tail` = outgoing tail faded out alone — a clean ending on the last repeat.
+- `outro` = by default, `audio[loop_end − fade_out_n :]` played straight through — the tail region continues into the song's original ending. Pass `--fade-out-ending` to fade the tail to silence instead.
 
 ### Pre-head crossfade
 
@@ -49,7 +49,7 @@ The incoming material in the crossfade is `audio[loop_start − fade_in_n : loop
 
 ## How `auto.py` works
 
-Four stages, each explainable in one line:
+Six stages, each explainable in one line:
 
 ### 1. Foote novelty (MFCC, 1-second checkerboard kernel)
 
@@ -77,9 +77,17 @@ The extra "first-peak" bonus encodes a human-like prior: *the body begins at the
 
 The top pair is the suggestion; the top-5 is printed for inspection.
 
-### 4. Bar-snapped fades
+### 4. Downbeat-snapped fades
 
-BPM comes from `librosa.beat.beat_track`. Bar length (in 4/4) = `4 × 60 / bpm`. Targets are chosen as a fraction of the loop duration (20% out, 10% in) then snapped to the nearest musical bar count from a small set (`[4, 6, 8, 12, 16]` for fade-out, `[2, 4, 6, 8]` for fade-in). Fades that land on phrase boundaries feel deliberate; fades that fall between bars sound "sub-loop" — right duration, wrong rhythm.
+BPM and beat positions come from `librosa.beat.beat_track`. Beats are grouped into bars of 4; all four phase offsets are tried and the one whose downbeats land closest to structural novelty peaks is selected. Fade targets (20% of loop duration out, 10% in) are then snapped to the nearest *actual* detected downbeat rather than a multiple of the estimated bar length, so fade start positions land on real bar-1 positions rather than average-BPM estimates.
+
+### 5. Phase alignment
+
+A window centred on `loop_start` is cross-correlated with a ±50 ms search region around `loop_end`. The lag that maximises correlation is the sample offset where the waveform phase at `loop_end` best matches `loop_start`, reducing the audible discontinuity inside the crossfade blend.
+
+### 6. Adaptive loudness
+
+The RMS of the outgoing tail (`audio[loop_end − fade_out_n : loop_end]`) and the incoming pre-head (`audio[loop_start − fade_in_n : loop_start]`) are measured. Their ratio becomes `--gain-db`, so the loop-around neither pops loud nor drops quiet regardless of how the two sections differ in level.
 
 ## Why this pipeline vs. PyMusicLooper
 
@@ -109,5 +117,6 @@ ffmpeg -ss 60 -i Loops/v4_auto.wav -t 20 -c copy Loops/preview_v4_auto.wav
 | `--fade-ms` | loop | shorthand that sets both to the same value |
 | `--gain-db` | loop | boost on the incoming side of the crossfade |
 | `--repeats` | loop | number of body repetitions |
+| `--fade-out-ending` | loop | fade the tail to silence instead of playing the original outro |
 | `--min-loop-s` | auto | minimum acceptable loop length |
 | `--render` | auto | after analysis, render the suggested loop directly |

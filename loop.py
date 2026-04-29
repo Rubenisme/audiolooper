@@ -68,6 +68,7 @@ def render_loop(
     gain_db: float,
     repeats: int,
     include_intro: bool,
+    fade_out_ending: bool = False,
 ) -> np.ndarray:
     loop_start = int(round(loop_start_s * sr))
     loop_end = int(round(loop_end_s * sr))
@@ -86,9 +87,9 @@ def render_loop(
 
     crossfade = outgoing.copy()
     crossfade[-fade_in_n:] += incoming
-    final_tail = outgoing
 
     body = audio[loop_start:loop_end - fade_out_n]
+    ending = outgoing if fade_out_ending else audio[loop_end - fade_out_n:]
 
     parts = []
     if include_intro and loop_start > 0:
@@ -97,7 +98,7 @@ def render_loop(
     for _ in range(repeats - 1):
         parts.append(crossfade)
         parts.append(body)
-    parts.append(final_tail)
+    parts.append(ending)
 
     return np.concatenate(parts, axis=0)
 
@@ -114,6 +115,7 @@ def main():
     p.add_argument("--repeats", type=int, default=4)
     p.add_argument("--output", type=Path, default=None)
     p.add_argument("--no-intro", action="store_true")
+    p.add_argument("--fade-out-ending", action="store_true", help="end with a fade-out instead of the original outro")
     p.add_argument("--sr", type=int, default=44100)
     args = p.parse_args()
 
@@ -144,6 +146,7 @@ def main():
         audio, args.sr, start_s, end_s,
         fade_out_ms, fade_in_ms, args.gain_db, args.repeats,
         include_intro=not args.no_intro,
+        fade_out_ending=args.fade_out_ending,
     )
 
     if args.output is None:
