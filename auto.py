@@ -250,21 +250,45 @@ def compute_adaptive_gain_db(
     fade_in_s: float,
 ) -> float:
     """Return gain_db that makes the incoming pre-head RMS match the outgoing tail RMS."""
-    loop_start = int(round(loop_start_s * sr))
-    loop_end = int(round(loop_end_s * sr))
-    fade_out_n = int(round(fade_out_s * sr))
-    fade_in_n = int(round(fade_in_s * sr))
+    def safe_rms(x: np.ndarray) -> float | None:
+        if x.size == 0:
+            return None
+        finite = x[np.isfinite(x)]
+        if finite.size == 0:
+            return None
+        rms = float(np.sqrt(np.mean(finite ** 2)))
+        if not np.isfinite(rms):
+            return None
+        return rms
+
+    n = len(audio_mono)
+    loop_start = int(np.clip(int(round(loop_start_s * sr)), 0, n))
+    loop_end = int(np.clip(int(round(loop_end_s * sr)), 0, n))
+    if loop_end <= loop_start:
+        return 0.0
+
+    fade_out_n = max(1, int(round(fade_out_s * sr)))
+    fade_in_n = max(1, int(round(fade_in_s * sr)))
+    fade_out_n = min(fade_out_n, loop_end)
+    fade_in_n = min(fade_in_n, loop_start)
 
     outgoing = audio_mono[loop_end - fade_out_n : loop_end]
     incoming = audio_mono[loop_start - fade_in_n : loop_start]
 
-    rms_out = float(np.sqrt(np.mean(outgoing ** 2)))
-    rms_in = float(np.sqrt(np.mean(incoming ** 2)))
-
-    if rms_in < 1e-10:
+    rms_out = safe_rms(outgoing)
+    rms_in = safe_rms(incoming)
+    if rms_out is None or rms_in is None:
+        return 0.0
+    if rms_out < 1e-10 or rms_in < 1e-10:
         return 0.0
 
-    gain_db = 20.0 * float(np.log10(rms_out / rms_in))
+    ratio = rms_out / rms_in
+    if ratio <= 0.0 or not np.isfinite(ratio):
+        return 0.0
+
+    gain_db = 20.0 * float(np.log10(ratio))
+    if not np.isfinite(gain_db):
+        return 0.0
     return float(np.clip(gain_db, -12.0, 12.0))
 
 

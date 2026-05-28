@@ -30,6 +30,11 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+def sanitize_gain_db(gain_db: float, default_db: float = 0.0) -> float:
+    if np.isfinite(gain_db):
+        return float(gain_db)
+    return float(default_db)
+
 
 def parse_time(t: str) -> float:
     if ":" in t:
@@ -76,6 +81,7 @@ def render_loop(
     fade_in_n = int(round(fade_in_ms / 1000.0 * sr))
     fade_out_n = max(1, min(fade_out_n, loop_end - loop_start - 1))
     fade_in_n = max(1, min(fade_in_n, loop_start, fade_out_n))
+    gain_db = sanitize_gain_db(gain_db)
     gain = 10.0 ** (gain_db / 20.0)
 
     # Outgoing tail fills the crossfade region; incoming pre-head aligns to the end of it.
@@ -136,15 +142,22 @@ def main():
     print(f"  {dur:.2f}s @ {args.sr} Hz, stereo")
     if end_s > dur:
         sys.exit(f"error: --end ({end_s}s) exceeds track duration ({dur:.2f}s)")
+    gain_db = sanitize_gain_db(args.gain_db)
+    if gain_db != args.gain_db:
+        print(
+            f"warning: non-finite --gain-db value ({args.gain_db}); "
+            "falling back to 0.0 dB",
+            file=sys.stderr,
+        )
 
     print(
         f"rendering loop {start_s:.3f}s -> {end_s:.3f}s  "
         f"fade_out={fade_out_ms}ms  fade_in={fade_in_ms}ms  "
-        f"gain=+{args.gain_db}dB  repeats={args.repeats}"
+        f"gain=+{gain_db}dB  repeats={args.repeats}"
     )
     out = render_loop(
         audio, args.sr, start_s, end_s,
-        fade_out_ms, fade_in_ms, args.gain_db, args.repeats,
+        fade_out_ms, fade_in_ms, gain_db, args.repeats,
         include_intro=not args.no_intro,
         fade_out_ending=args.fade_out_ending,
     )
